@@ -17,7 +17,8 @@ class HyperParams(dict):
 
 
 default_hps = HyperParams(
-    directions=(-1, -1),
+    directions=(-1, -1, +1),
+    objectives=['sum', 'prod', 'max'],
 
     n_params=3,
     param_ranges=(-1, 1, 0.01),
@@ -27,6 +28,8 @@ default_hps = HyperParams(
 
     n_population=8,
     n_generation=50,
+
+    log_dir="../log",
 )
 
 
@@ -36,11 +39,7 @@ def setup_hyperparams(**kwargs: dict[str, Any]) -> HyperParams:
         assert k in hps, f"Hyper Parameter '{k}' does not exist."
         hps[k] = v
 
-    hps['n_param_step'] = len(np.arange(*hps.param_ranges))
-    hps['n_param_bit'] = int(np.ceil(np.log2(hps.n_param_step)))
-    hps['n_param_step_bit'] = 2 ** hps.n_param_bit
-    hps['lows'] = [hps.param_ranges[0] for _ in range(hps.n_params)]
-    hps['highs'] = [hps.param_ranges[1] for _ in range(hps.n_params)]
-
-    print(f"Hyper Parameters: {hps}")
+    hps.n_param_step = len(np.arange(*hps.param_ranges))
+    hps.n_param_bit = int(np.ceil(np.log2(hps.n_param_step)))
+    hps.n_param_step_bit = 2 ** hps.n_param_bit
     return hps

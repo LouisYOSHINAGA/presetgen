@@ -1,34 +1,13 @@
 from deap import creator, base, tools, algorithms
-import numpy as np
-from typing import TypeAlias
 from hparam import HyperParams
-from util import Graycode, i2g, g2i
-from obj import objective, plot_pareto_front
+from conv import Population, Parameters, ParametersSet, encode, decode
+from obj import ObjectiveValues, ObjectiveValuesSet, objective
+from util import OptRecorder, setup_logger, save_history, save_scatter_matrix
 
 
-Parameters: TypeAlias = list[float]
-Individual: TypeAlias = Graycode
-Population: TypeAlias = list[Individual]
+def initialize(hps: HyperParams) -> tuple[base.Toolbox, OptRecorder, tools.ParetoFront]:
+    hps.logger = setup_logger(hps=hps, name=__name__)
 
-
-def encode(hps: HyperParams) -> Individual:
-    individual: Individual = []
-    for _ in range(hps.n_params):
-        param_int_bit: int = np.random.default_rng().integers(0, hps.n_param_step_bit)  # sample from [0, hps.n_param_step_bit)
-        individual.extend(i2g(param_int_bit, hps.n_param_bit))
-    return individual
-
-def decode(individual: Individual, hps: HyperParams) -> Parameters:
-    parameters: Parameters = []
-    sbit: int = 0
-    for _ in range(hps.n_params):
-        bits: int = hps.n_param_bit
-        param_int: float = round(hps.n_param_step * g2i(individual[sbit:sbit+bits]) / hps.n_param_step_bit)
-        parameters.append(hps.param_ranges[0] + hps.param_ranges[2] * param_int)
-        sbit += bits
-    return parameters
-
-def initialize(hps: HyperParams) -> tuple[base.Toolbox, tools.Statistics, tools.Logbook, tools.ParetoFront]:
     creator.create("FitnessMulti", base.Fitness, weights=hps.directions)
     creator.create("Individual", list, fitness=creator.FitnessMulti)
 
@@ -36,65 +15,72 @@ def initialize(hps: HyperParams) -> tuple[base.Toolbox, tools.Statistics, tools.
     toolbox.register("parameters", encode, hps=hps)
     toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.parameters)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual, n=hps.n_population)
-
     toolbox.register("mate", tools.cxTwoPoint)
     toolbox.register("mutate", tools.mutFlipBit, indpb=1/len(encode(hps)))
     toolbox.register("select", tools.selNSGA2)
     toolbox.register("evaluate", objective, hps=hps)
 
-    stats = tools.Statistics(lambda individual: individual.fitness.values)
-    stats.register("minimize", min)
-    stats.register("maximize", max)
-    logbook = tools.Logbook()
-    logbook.header = ("generation", "minimize", "maximize")
+    recorder = OptRecorder(keys=["params", "objs"])
     pareto_front = tools.ParetoFront()
 
-    return toolbox, stats, logbook, pareto_front
+    return toolbox, recorder, pareto_front
 
 def optimize(hps: HyperParams) -> None:
-    toolbox, stats, logbook, pareto_front = initialize(hps)
+    toolbox, recorder, pareto_front = initialize(hps)
 
     population: Population = toolbox.population()  # P(t=0)
-    evaluate(toolbox, population, None, hps)
+    evaluate(toolbox, population, None, None, hps)
 
     for generation in range(hps.n_generation):
         offspring: Population = algorithms.varAnd(population, toolbox, cxpb=hps.p_mate, mutpb=hps.p_mutate)  # Q(t)
-
-        evaluate(toolbox, offspring, pareto_front, hps)
-        logbook.record(generation=generation, **stats.compile(offspring))
-        print(f"{logbook.stream}")
-
+        evaluate(toolbox, offspring, recorder, pareto_front, hps)
         population[:] = toolbox.select(population+offspring, k=hps.n_population)  # P(t+1)
 
-    finalize(pareto_front, hps)
+    finalize(recorder, pareto_front, hps)
 
-def evaluate(toolbox: base.Toolbox, individuals: Population, pareto_front: tools.ParetoFront|None, hps: HyperParams) -> None:
+def evaluate(toolbox: base.Toolbox, individuals: Population,
+             recorder: OptRecorder|None, pareto_front: tools.ParetoFront|None,
+             hps: HyperParams) -> None:
     for individual in individuals:
+        params: Parameters = decode(individual, hps)
         if not individual.fitness.valid:
-            individual.fitness.values = toolbox.evaluate(decode(individual, hps))
+            individual.fitness.values = toolbox.evaluate(params)
+        if recorder is not None:
+            recorder(params=params, objs=individual.fitness.values)
+
     if pareto_front is not None:
         pareto_front.update(individuals)
 
-def finalize(pareto_front: tools.ParetoFront, hps: HyperParams) -> None:
-    print(f"Pareto Front:")
+def finalize(recorder: OptRecorder, pareto_front: tools.ParetoFront, hps: HyperParams) -> None:
+    paramss: ParametersSet = []
+    objss: ObjectiveValuesSet = []
+
+    hps.logger.info(f"Pareto Front:\n")
     for i, individual in enumerate(pareto_front):
-        print(f"{i:03d}: ", end="")
+        hps.logger.info(f"{i:03d}-th:\n")
 
-        print(f"parameter = [", end="")
         params: Parameters = decode(individual, hps)
+        paramss.append(params)
+
+        hps.logger.info(f"  parameters = [")
         for j, param in enumerate(params):
-            print(f"{param:05f}", end="")
+            hps.logger.info(f"{param:05f}")
             if j < len(params) - 1:
-                print(f", ", end="")
+                hps.logger.info(f", ")
             else:
-                print(f"], ", end="")
+                hps.logger.info(f"]\n")
 
-        print(f"objective = [", end="")
-        for j, obj in enumerate(individual.fitness.values):
-            print(f"{obj:05f}", end="")
+        objs: ObjectiveValues = individual.fitness.values
+        objss.append(objs)
+
+        hps.logger.info(f"  objectives = [")
+        for j, obj in enumerate(objs):
+            hps.logger.info(f"{obj:05f}")
             if j < len(individual.fitness.values) - 1:
-                print(f", ", end="")
+                hps.logger.info(f", ")
             else:
-                print(f"]")
+                hps.logger.info(f"]\n\n")
 
-    plot_pareto_front(pareto_front)
+    save_history(recorder, key="params", xlabel="n_individual", ylabel="parameter value", hps=hps)
+    save_history(recorder, key="objs", xlabel="n_individual", ylabel=hps.objectives, hps=hps)
+    save_scatter_matrix(objss, hps)
